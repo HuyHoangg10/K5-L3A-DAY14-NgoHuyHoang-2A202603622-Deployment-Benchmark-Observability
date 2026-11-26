@@ -7,50 +7,47 @@
 
 ---
 
-## 1. Thông tin Deploy
+## 1. Trạng thái Deploy
 
-* **Nền tảng triển khai:** Railway (hoặc Render)
-* **URL Public của Agent:** `https://k5-l3a-day14-ngohuyhoang.up.railway.app`
-* **Cấu hình builder:** `DOCKERFILE` qua file `railway.toml`
+* **Nền tảng mục tiêu:** Railway (`06-lab-complete/railway.toml`) hoặc Render (`06-lab-complete/render.yaml`)
+* **Trạng thái hiện tại:** **Chưa deploy lên cloud** (đã chuẩn bị đầy đủ `Dockerfile`, `railway.toml`, `render.yaml` trong `06-lab-complete/`, nhưng chưa tạo service và Redis cloud để có Public URL chạy thật).
+* **Public URL:** *(Chưa có — cần deploy thư mục `06-lab-complete/` lên Railway hoặc Render và điền URL vào đây)*
 
 ---
 
-## 2. Các biến môi trường đã thiết lập trên Dashboard Cloud
+## 2. Cấu hình nền tảng & Biến môi trường cần thiết lập
 
-| Tên biến môi trường | Giá trị thiết lập | Mô tả mục đích |
+Trong `06-lab-complete/railway.toml`:
+* `builder = "DOCKERFILE"`, `healthcheckPath = "/health"`, `CMD` trong `Dockerfile` đọc `${PORT:-8000}`.
+
+Trong `06-lab-complete/render.yaml`:
+* `type: web`, `runtime: docker`, `plan: free`, `healthCheckPath: /health`.
+* Secret `AGENT_API_KEY` dùng `generateValue: true`; `REDIS_URL` dùng `sync: false` (không ghi secret vào code).
+
+| Tên biến môi trường | Giá trị mẫu / Nguồn | Mục đích |
 | :--- | :--- | :--- |
-| `PORT` | `8000` | Cổng dịch vụ lắng nghe (nền tảng tự động cấp) |
-| `ENVIRONMENT` | `production` | Môi trường triển khai thực tế |
-| `AGENT_API_KEY` | `secret-prod-vinuni-2026` | API Key bảo vệ endpoint `/ask` |
-| `REDIS_URL` | `redis://...` | Kết nối tới instance Redis được cấp trên cloud |
-| `RATE_LIMIT_PER_MINUTE` | `10` | Giới hạn tối đa 10 request/phút |
-| `DAILY_BUDGET_USD` | `1.0` | Ngân sách giới hạn chi phí LLM trong ngày |
+| `PORT` | Do Railway/Render tự cấp (mặc định `8000`) | Cổng lắng nghe của `uvicorn` |
+| `ENVIRONMENT` | `production` | Cấu hình môi trường chạy thật |
+| `AGENT_API_KEY` | Tạo ngẫu nhiên / đặt trên dashboard | Xác thực header `X-API-Key` cho `POST /ask` |
+| `REDIS_URL` | `redis://...` từ addon Redis trên cloud | Lưu state rate limit & cost guard (stateless) |
+| `RATE_LIMIT_PER_MINUTE` | `10` | Giới hạn request mỗi phút / API key |
+| `DAILY_BUDGET_USD` | `1.0` | Giới hạn ngân sách LLM theo ngày |
 
 ---
 
-## 3. Lệnh kiểm tra xác thực (Test Commands)
+## 3. Lệnh triển khai & 4 lệnh tự kiểm sau khi deploy (CP6)
 
-### 1. Kiểm tra Liveness (Trả về 200 OK):
+Sau khi deploy `06-lab-complete/` kèm Redis addon trên Railway/Render, đặt `BASE=<URL_PUBLIC>` và `AGENT_API_KEY=<KEY_DA_DAT>` rồi chạy:
+
 ```bash
-curl -i https://k5-l3a-day14-ngohuyhoang.up.railway.app/health
+curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/health"     # Mong đợi: 200
+curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"      # Mong đợi: 200 (khi có REDIS_URL đúng)
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -d '{"question":"Hello"}'   # Mong đợi: 401
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -H "X-API-Key: $AGENT_API_KEY" -d '{"question":"Hello"}'   # Mong đợi: 200
 ```
 
-### 2. Kiểm tra Readiness (Trả về 200 OK khi Redis kết nối):
+Và chạy kiểm tra cuối bằng script chấm:
 ```bash
-curl -i https://k5-l3a-day14-ngohuyhoang.up.railway.app/ready
-```
-
-### 3. Kiểm tra từ chối khi không có API Key (Trả về 401 Unauthorized):
-```bash
-curl -i -X POST https://k5-l3a-day14-ngohuyhoang.up.railway.app/ask \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is deployment?"}'
-```
-
-### 4. Kiểm tra thành công khi có API Key (Trả về 200 OK):
-```bash
-curl -i -X POST https://k5-l3a-day14-ngohuyhoang.up.railway.app/ask \
-  -H "X-API-Key: secret-prod-vinuni-2026" \
-  -H "Content-Type: application/json" \
-  -d '{"question": "What is deployment?"}'
+cd 06-lab-complete
+python check_production_ready.py --public-url "$BASE"
 ```

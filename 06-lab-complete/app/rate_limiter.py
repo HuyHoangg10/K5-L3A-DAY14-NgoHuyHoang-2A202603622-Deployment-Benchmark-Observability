@@ -3,6 +3,7 @@ Rate limiting (tiêu chí 7).
 """
 import os
 import time
+import uuid
 from fastapi import HTTPException
 from app.config import settings
 from app.redis_client import get_redis_client
@@ -18,6 +19,7 @@ def check_rate_limit(key: str) -> None:
     redis_key = f"rate_limit:{key}"
     now = time.time()
     window = 60.0
+    member = f"{now}:{uuid.uuid4().hex}"
 
     try:
         pipe = client.pipeline()
@@ -34,7 +36,7 @@ def check_rate_limit(key: str) -> None:
             )
 
         pipe = client.pipeline()
-        pipe.zadd(redis_key, {str(now): now})
+        pipe.zadd(redis_key, {member: now})
         pipe.expire(redis_key, int(window) + 10)
         pipe.execute()
     except HTTPException:

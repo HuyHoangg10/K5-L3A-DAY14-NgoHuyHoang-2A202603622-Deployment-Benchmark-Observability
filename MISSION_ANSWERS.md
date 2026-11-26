@@ -9,156 +9,175 @@
 
 ## Part 1: Localhost vs Production
 
-### Exercise 1.1: Anti-patterns trong code cơ bản (develop)
-1. **Hardcode secrets và credentials:** API key (`sk-secret-key-123`), database URL hoặc connection string được viết thẳng vào mã nguồn thay vì đọc từ biến môi trường (`os.getenv`).
-2. **Không có Health Check / Readiness Endpoint:** Thiếu các endpoint `/health` (Liveness) và `/ready` (Readiness) khiến hệ thống điều phối (Docker, Kubernetes, Cloud Platform) không thể giám sát tình trạng sống/chết của agent.
-3. **Logging thô sơ bằng `print()`:** Xuất log không có cấu trúc, không có timestamp, level (INFO/WARN/ERROR) hay metadata, khiến việc debug và phân tích log tự động (qua ELK/Loki/Grafana) bất khả thi.
-4. **Tắt tiến trình đột ngột (Không có Graceful Shutdown):** Khi nhận tín hiệu dừng hệ thống (SIGTERM/SIGINT), tiến trình bị ngắt ngay lập tức, làm đứt các request đang xử lý của người dùng và hỏng dữ liệu dở dang.
-5. **Stateful trong bộ nhớ RAM:** Lưu conversation history và session trực tiếp trong RAM của tiến trình (`memory dict`). Khi scale nhiều instance hoặc khi server restart, dữ liệu người dùng bị mất sạch hoặc request bị định tuyến lệch phiên.
+### Exercise 1.1: Anti-patterns tìm thấy trong `01-localhost-vs-production/develop/app.py`
+1. **Hardcode secrets & credentials trong source code (dòng 17–18):**
+   `OPENAI_API_KEY = "sk-hardcoded-fake-key-never-do-this"` và `DATABASE_URL = "postgresql://admin:password123@localhost:5432/mydb"` — đẩy lên GitHub là lộ secret ngay lập tức.
+2. **Hardcode config thay vì dùng env vars (dòng 21–22):** `DEBUG = True`, `MAX_TOKENS = 500` không thể đổi nhanh giữa dev / staging / production.
+3. **Logging bằng `print()` và làm lộ secret ra log (dòng 33–34, 38):** `print(f"[DEBUG] Using key: {OPENAI_API_KEY}")` vừa khó parse tự động vừa in thẳng API key ra stdout.
+4. **Thiếu Health Check / Readiness Endpoint (dòng 42–43):** Không có `/health` và `/ready`, nền tảng cloud/load balancer không phát hiện được khi app treo hoặc chưa sẵn sàng.
+5. **Cấu hình server chỉ chạy được trên localhost và tắt đột ngột (dòng 49–53):** `host="localhost"`, cố định `port=8000`, bật `reload=True` trong production, và không xử lý `SIGTERM`/graceful shutdown.
 
-### Exercise 1.2: Kết quả chạy thử bản develop
-Gọi endpoint bản develop bằng query parameter:
+**So sánh đối chiếu code đã sửa trong `01-localhost-vs-production/production/`:**
+- `production/config.py` (dòng 17–43): Toàn bộ cấu hình đọc từ `os.getenv(...)`, và hàm `Settings.validate()` kiểm tra **fail-fast** (`raise ValueError("AGENT_API_KEY must be set in production!")` khi thiếu `AGENT_API_KEY` ở môi trường `production`).
+- `production/app.py` (dòng 28–31, 40–67, 135–161, 180–198): Bổ sung JSON logging (`logging.basicConfig`), `lifespan` + `signal.signal(signal.SIGTERM, handle_sigterm)` để graceful shutdown, thêm `GET /health` + `GET /ready`, bind `host="0.0.0.0"` và đọc `PORT` từ env.
+
+### Exercise 1.2: Kết quả chạy thực tế bản develop (và kiểm chứng production)
+Chạy `01-localhost-vs-production/develop/app.py` và gọi đúng theo query param (lưu ý #3 K5):
 ```bash
 curl -X POST "http://localhost:8000/ask?question=Hello"
 ```
-Kết quả trả về JSON hợp lệ:
+Output thực tế ghi nhận:
 ```json
-{"question": "Hello", "answer": "This is a mock answer from local development agent."}
+HTTP 200: {"answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
 ```
+Khi chạy thử `01-localhost-vs-production/production/app.py` với `ENVIRONMENT=production` và chưa đặt `AGENT_API_KEY`, app báo lỗi ngay lúc khởi động đúng như thiết kế fail-fast: `ValueError: AGENT_API_KEY must be set in production!`. Khi cấp `AGENT_API_KEY=demo-key`, kết quả thực tế:
+- `GET /health` → `200 {'status': 'ok', 'uptime_seconds': 0.1, 'version': '1.0.0', 'environment': 'production', ...}`
+- `GET /ready` → `200 {'ready': True}`
+- `POST /ask` (`{"question": "Hello"}`) → `200 {'question': 'Hello', 'answer': 'Đây là câu trả lời từ AI agent (mock)...', 'model': 'gpt-4o-mini'}`
 
 ### Exercise 1.3: Bảng so sánh Develop vs Production
-| Tiêu chí | Bản Develop (Localhost) | Bản Production | Tại sao quan trọng? |
+| Feature | Develop (`develop/app.py`) | Production (`production/app.py` + `config.py`) | Tại sao quan trọng? |
 | :--- | :--- | :--- | :--- |
-| **Cấu hình (Config)** | Hardcode trong file `.py` | Đọc qua biến môi trường (`os.getenv`), hỗ trợ `.env` | Tuân thủ chuẩn 12-Factor App; dễ triển khai đa môi trường (Dev/Staging/Prod); bảo mật không lộ secret lên Git. |
-| **Health Check** | Không có hoặc chỉ có 1 route sơ sài | Tách biệt `/health` (Liveness) và `/ready` (Readiness kiểm tra Redis) | Giúp bộ cân bằng tải (Load Balancer) và Container Orchestrator biết khi nào agent sẵn sàng nhận traffic và khi nào cần tự khởi động lại. |
-| **Logging** | Dùng hàm `print()` | Structured Logging định dạng chuẩn JSON | Dễ dàng parse, lọc, gom cụm (indexing) và tìm kiếm qua các hệ thống giám sát tập trung. |
-| **Xử lý tắt (Shutdown)** | Tắt ngay tức thì khi bị ngắt | Bắt tín hiệu SIGTERM (Lifespan handler) để Graceful Shutdown | Cho phép hoàn tất các request đang xử lý dở trước khi ngắt tiến trình, tránh lỗi kết nối cho người dùng. |
-| **Quản lý trạng thái** | Lưu trong biến bộ nhớ RAM | Đẩy toàn bộ State ra Redis (Stateless) | Cho phép mở rộng nhiều instance (horizontal scaling) đằng sau Load Balancer mà không bị mất phiên làm việc. |
+| **Config & Secrets** | Hardcode `OPENAI_API_KEY`, `DATABASE_URL`, `port=8000` | Đọc qua `os.getenv(...)` trong `Settings`, có `validate()` fail-fast | Tuân thủ 12-Factor App; cùng một artifact chạy được mọi môi trường, không lộ secret lên Git. |
+| **Health check** | Không có `/health`, `/ready` | Có `GET /health` (liveness) và `GET /ready` (readiness, trả 503 khi chưa sẵn sàng) | Giúp platform tự restart container lỗi và load balancer ngừng route traffic tới instance chưa sẵn sàng. |
+| **Logging** | `print("[DEBUG] ...")`, lộ cả `OPENAI_API_KEY` | Structured JSON logging (`{"time":..., "level":..., "msg":...}`), không log secret | Dễ index, lọc và cảnh báo trên hệ thống log tập trung (Loki, Datadog, Cloud Logging). |
+| **Shutdown** | Ngắt tiến trình đột ngột, không có lifecycle hook | `lifespan` (set `is_ready = False`, đợi in-flight) + bắt `SIGTERM` | Tránh cắt ngang request của khách hàng đang xử lý khi deploy rolling update hoặc scale down. |
+| **Network binding** | `host="localhost"`, `reload=True` | `host="0.0.0.0"`, `reload=settings.debug` (False ở prod) | Container chỉ nhận được traffic từ bên ngoài khi lắng nghe `0.0.0.0`; tắt reload để ổn định và tiết kiệm CPU/RAM. |
 
 ---
 
 ## Part 2: Docker & Containerization
 
-### Exercise 2.1: Các câu hỏi về Dockerfile
-1. **Base image là gì và vì sao chọn `python:3.11-slim`?**
-   * Base image cung cấp hệ điều hành tối giản và môi trường thực thi Python. Chọn `python:3.11-slim` thay vì `python:3.11` tiêu chuẩn vì nó đã loại bỏ các công cụ build dư thừa (trình biên dịch gcc, tài liệu...), giúp kích thước image giảm mạnh từ ~1GB xuống dưới 150MB, giảm bề mặt tấn công bảo mật.
-2. **`WORKDIR /app` có tác dụng gì?**
-   * Thiết lập thư mục làm việc mặc định bên trong container. Mọi lệnh `COPY`, `RUN`, `CMD` tiếp theo sẽ được thực thi tại thư mục này, giữ cấu trúc file gọn gàng.
-3. **Tại sao `COPY requirements.txt` phải đứng trước `COPY . .`?**
-   * Tận dụng cơ chế **Layer Caching** của Docker. Các dependencies ít khi thay đổi hơn mã nguồn; nếu đặt `requirements.txt` trước, Docker chỉ cần build lại bước cài đặt thư viện (`pip install`) khi file requirements thay đổi, giúp tăng tốc độ build khi sửa code từ vài phút xuống vài giây.
-4. **Sự khác biệt giữa `CMD` và `ENTRYPOINT`?**
-   * `ENTRYPOINT` định nghĩa câu lệnh cố định luôn được thực thi khi container chạy. `CMD` cung cấp các tham số hoặc lệnh mặc định có thể bị ghi đè khi người dùng chạy `docker run <image> <command_mới>`.
+### Exercise 2.1: Phân tích `02-docker/develop/Dockerfile`
+1. **Base image:** `python:3.11` (chứa Debian OS đầy đủ + bộ cài Python 3.11 và build tools, dung lượng gốc lớn ~1 GB; bản production đổi sang `python:3.11-slim`).
+2. **Working directory:** `WORKDIR /app` — đặt thư mục làm việc mặc định trong container là `/app`, giúp các lệnh `COPY`, `RUN`, `CMD` phía sau hoạt động gọn trong `/app`.
+3. **Tại sao `COPY 02-docker/develop/requirements.txt .` phải đứng trước `COPY 02-docker/develop/app.py .`?** Vì Docker build theo từng layer có cache. `requirements.txt` ít thay đổi hơn code trong `app.py`; đặt trước giúp Docker tái sử dụng layer cache của bước `RUN pip install`, không phải tải và cài lại toàn bộ thư viện mỗi lần chỉ sửa code Python.
+4. **CMD vs ENTRYPOINT:** `ENTRYPOINT` cố định file thực thi chính khi container khởi chạy (khó bị ghi đè vô tình); `CMD` định nghĩa lệnh/tham số mặc định và có thể bị ghi đè dễ dàng khi truyền tham số vào cuối lệnh `docker run`.
 
-### Exercise 2.3: So sánh kích thước Docker Image
-* **Image bản develop (Single-stage, full base):** `~1.02 GB`
-* **Image bản production (Multi-stage, python-slim, non-root user):** `~185 MB`
-* **Độ chênh lệch:** Giảm **~81.8%** dung lượng, thời gian pull image và khởi động container nhanh hơn đáng kể.
+### Exercise 2.2 & 2.3: Phân tích Multi-stage build (`02-docker/production/Dockerfile`)
+- **Stage 1 (`builder` từ `python:3.11-slim`):** Cài compiler (`gcc`, `libpq-dev`) và chạy `pip install --no-cache-dir --user -r requirements.txt` vào `/root/.local`. Image trung gian này chứa công cụ build nhưng không được đưa vào sản phẩm cuối.
+- **Stage 2 (`runtime` từ `python:3.11-slim`):** Chỉ `COPY --from=builder /root/.local /home/appuser/.local`, copy code cần thiết, tạo user non-root `appuser`, khai báo `HEALTHCHECK` và `CMD ["uvicorn", ...]`. Nhờ loại bỏ `gcc`/`apt` cache và dùng base `slim`, dung lượng image giảm mạnh so với `python:3.11` full và thu hẹp bề mặt tấn công.
+- *(Ghi chú trung thực: Máy Windows hiện tại chưa bật được WSL2/cài Docker Desktop nên chưa đo trực tiếp số MB bằng `docker images` và chưa chạy stack Nginx ở 2.4; phần phân tích dựa trên Dockerfile và `docker-compose.yml` thực tế trong repo.)*
 
-### Exercise 2.4: Sơ đồ kiến trúc Stack Docker Compose
+### Exercise 2.4: Sơ đồ kiến trúc Stack trong `02-docker/production/docker-compose.yml`
 ```text
-[ Client (Browser / cURL) ]
-             │
-             ▼ Port 80
-     ┌───────────────┐
-     │  Nginx Proxy  │ (Reverse Proxy & Load Balancer)
-     └───────┬───────┘
-             │ Port 8000
-    ┌────────┴────────┐
-    ▼                 ▼
-[ Agent Instance 1 ]  [ Agent Instance 2 ]
-    └────────┬────────┘
-             │ Port 6379
-             ▼
-     ┌───────────────┐
-     │  Redis Cache  │ (Session State & Rate Limiter)
-     └───────────────┘
+Client ──▶ Nginx (:80, rate limit 10r/s burst 20)
+                │
+                ▼ (proxy_pass http://agent_backend -> agent:8000)
+           Agent Service (:8000, non-root runtime)
+             ├──▶ Redis (:6379, session cache & rate limit)
+             └──▶ Qdrant (:6333, vector database cho RAG)
 ```
+Trong `02-docker/production/nginx/nginx.conf`, Nginx chặn rate limit ở cổng 80 (`429` JSON), bỏ qua rate limit cho `/health`, và giấu port `8000` của `agent` trong mạng Docker `internal`.
 
 ---
 
 ## Part 3: Cloud Deployment
 
-### Exercise 3.1 & 3.2: Cấu hình Railway và Render
-* **Nền tảng chính:** Railway (`railway.toml`)
-* **Nền tảng so sánh:** Render (`render.yaml`)
-* **So sánh điểm khác biệt:**
-  * `railway.toml` gọn nhẹ, tập trung khai báo builder (`DOCKERFILE`) và đường dẫn `healthcheckPath = "/health"`. Railway tự động cấp cổng ngẫu nhiên qua biến `$PORT`.
-  * `render.yaml` (Blueprint) mang tính khai báo hạ tầng (Infrastructure as Code) chặt chẽ hơn: khai báo loại service (`web`), plan, health check path, và quy định quản lý secret thông qua `sync: false` hoặc `generateValue: true` để tránh lưu trực tiếp giá trị nhạy cảm trong file code.
+### Exercise 3.1 & 3.2: Trạng thái Deploy & So sánh `railway.toml` vs `render.yaml`
+- **Trạng thái deploy:** Đã hoàn thiện cấu hình `06-lab-complete/railway.toml` và `06-lab-complete/render.yaml` đọc `$PORT`, `/health`, và biến môi trường không hardcode secret; tuy nhiên **chưa tạo service thực tế trên Railway/Render nên chưa có URL public hoạt động** (xem thêm [DEPLOYMENT.md](DEPLOYMENT.md)).
+- **So sánh `06-lab-complete/railway.toml` với `06-lab-complete/render.yaml`:**
+  - **`railway.toml`:** Khai báo ngắn gọn theo khối TOML (`[build] builder = "DOCKERFILE"`, `[deploy] healthcheckPath = "/health"`, `restartPolicyType = "ON_FAILURE"`). Railway tự cấp `$PORT` qua env, còn các biến nhạy cảm (`AGENT_API_KEY`, `REDIS_URL`) và addon Redis được cấu hình trực tiếp trên Dashboard hoặc Railway CLI chứ không khai báo trong `railway.toml`.
+  - **`render.yaml`:** Dùng chuẩn Blueprint (Infrastructure as Code) dạng YAML khai báo cả kiến trúc service (`type: web`, `runtime: docker`, `plan: free`, `healthCheckPath: /health`) lẫn danh sách `envVars` ngay trong repo. Điểm khác biệt quan trọng là `render.yaml` kiểm soát cách xử lý secret ngay trong file cấu hình bằng `generateValue: true` (cho `AGENT_API_KEY` để Render tự sinh key ngẫu nhiên) hoặc `sync: false` (cho `REDIS_URL` để nhập tay lúc deploy, tuyệt đối không ghi plain secret).
 
-### Exercise 3.3: Phân tích Pipeline CI/CD Google Cloud Run
-Dựa trên `cloudbuild.yaml` và `service.yaml`:
-1. **Trigger:** Kích hoạt tự động khi có commit mới đẩy lên nhánh chính của GitHub.
-2. **Step 1 (Build):** Cloud Build tải source code, thực thi `docker build` với multi-stage Dockerfile để tạo container image sản phẩm.
-3. **Step 2 (Push):** Đẩy image đã build vào kho lưu trữ an toàn Google Artifact Registry (`gcr.io/$PROJECT_ID/agent-service:$COMMIT_SHA`).
-4. **Step 3 (Deploy):** Áp dụng cấu hình từ `service.yaml`, triển khai image lên Cloud Run với cấu hình tài nguyên (CPU, RAM, auto-scaling 0 đến N instance), ánh xạ biến môi trường an toàn và chuyển dần 100% traffic sang bản revision mới.
+### Exercise 3.3: Mô tả Pipeline CI/CD GCP Cloud Run (`03-cloud-deployment/production-cloud-run/`)
+Đọc từ `cloudbuild.yaml` và `service.yaml`, pipeline đi qua **4 bước tuần tự**:
+1. **`test`:** Chạy trên container `python:3.11-slim`, cài `requirements.txt` + `pytest` và chạy `pytest tests/ -v --tb=short` — chỉ khi pass hết mới sang bước tiếp theo (`waitFor: [test]`).
+2. **`build`:** Dùng `gcr.io/cloud-builders/docker` build image gắn tag `gcr.io/$PROJECT_ID/ai-agent:$COMMIT_SHA` và `:latest` (tận dụng `--cache-from`).
+3. **`push`:** Đẩy cả 2 tag lên Google Container Registry (`gcr.io/$PROJECT_ID/ai-agent`).
+4. **`deploy`:** Dùng `gcloud run deploy ai-agent` triển khai revision mới lên Cloud Run (`asia-southeast1`, `min-instances=1`, `max-instances=10`, `512Mi`/`1 CPU`) và nạp secret từ Google Secret Manager (`--set-secrets=OPENAI_API_KEY=openai-key:latest`). File `service.yaml` bổ sung đặc tả Knative Service (IaC) với `containerConcurrency: 80`, `livenessProbe` (`/health`), `startupProbe` (`/ready`) và `secretKeyRef` cho `OPENAI_API_KEY` & `AGENT_API_KEY`.
 
 ---
 
 ## Part 4: API Security
 
-### Exercise 4.1 – 4.3: Minh chứng kiểm tra bảo mật API qua `curl -i`
+### Exercise 4.1: Kết quả chạy thực tế `04-api-gateway/develop/app.py` (API Key Auth)
+Chạy với `AGENT_API_KEY=secret-key-123`:
 
-1. **Trường hợp thiếu hoặc sai API Key (HTTP 401 Unauthorized):**
+1. **Không gửi API key (`401 Unauthorized`):**
 ```text
 HTTP/1.1 401 Unauthorized
-date: Wed, 25 Nov 2026 14:55:40 GMT
-server: uvicorn
-content-length: 49
 content-type: application/json
 
-{"detail":"Unauthorized: Missing or invalid API Key"}
+{"detail":"Missing API key. Include header: X-API-Key: <your-key>"}
 ```
-
-2. **Trường hợp có API Key hợp lệ (HTTP 200 OK):**
+2. **Gửi đúng `X-API-Key: secret-key-123` (`200 OK`):**
 ```text
 HTTP/1.1 200 OK
-date: Wed, 25 Nov 2026 14:55:41 GMT
-server: uvicorn
-content-length: 68
 content-type: application/json
 
-{"question":"What is deployment?","answer":"Deployment is..."}
+{"question":"Hello","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận."}
 ```
 
-3. **Trường hợp vượt giới hạn Rate Limit (HTTP 429 Too Many Requests):**
+### Exercise 4.2 & 4.3: Kết quả chạy thực tế `04-api-gateway/production/app.py` (JWT + Rate Limit)
+1. **Lấy JWT token từ `POST /auth/token` với `{"username": "student", "password": "demo123"}`:**
+   Trả về `HTTP 200` với `access_token` (đã che: `eyJhbGciOiJIUzI1NiIsInR5...<REDACTED>`), hết hạn sau 60 phút, role `user` (giới hạn 10 req/phút).
+2. **Gọi `/ask` không kèm token (`401 Unauthorized`):**
 ```text
+HTTP/1.1 401 Unauthorized
+www-authenticate: Bearer
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+referrer-policy: strict-origin-when-cross-origin
+
+{"detail":"Authentication required. Include: Authorization: Bearer <token>"}
+```
+3. **Gọi `/ask` kèm `Authorization: Bearer <REDACTED>` (`200 OK`):**
+```text
+HTTP/1.1 200 OK
+content-type: application/json
+x-content-type-options: nosniff
+x-frame-options: DENY
+
+{"question":"What is Docker?","answer":"Container là cách đóng gói app để chạy ở mọi nơi. Build once, run anywhere!","usage":{"requests_remaining":9,"budget_remaining_usd":1.9e-05}}
+```
+4. **Gửi burst liên tiếp vượt quá 10 request/phút (`429 Too Many Requests` ở request thứ 10 sau 1 request trước đó):**
+```text
+req 1..9: HTTP 200
+req 10: HTTP 429
 HTTP/1.1 429 Too Many Requests
-date: Wed, 25 Nov 2026 14:55:42 GMT
-server: uvicorn
-retry-after: 60
-content-length: 62
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1795685257
+retry-after: 59
 content-type: application/json
 
-{"detail":"Rate limit exceeded. Maximum 10 requests per minute."}
+{"detail":{"error":"Rate limit exceeded","limit":10,"window_seconds":60,"retry_after_seconds":59}}
 ```
 
-### Exercise 4.4: Thiết kế cơ chế Cost Guard bảo vệ ngân sách
-* **Cách tiếp cận:**
-  * Mỗi request đến endpoint `/ask` trước khi chuyển vào LLM sẽ được `check_budget()` kiểm tra tổng chi phí tích lũy trong ngày/tháng (đọc từ key Redis `total_llm_cost`).
-  * Nếu tổng chi phí đã chạm hoặc vượt ngưỡng `DAILY_BUDGET_USD` (hoặc `MONTHLY_BUDGET_USD`), hệ thống lập tức ngắt và trả về **HTTP 402 Payment Required**.
-  * Sau khi LLM xử lý xong, hệ thống tính toán chi phí token (Input token: \$0.00015 / 1K, Output token: \$0.0006 / 1K) và dùng lệnh `incrbyfloat` trong Redis để cộng dồn chi phí mà không gây xung đột giữa các worker.
+### Exercise 4.4: Cơ chế Cost Guard
+- **Trong `04-api-gateway/production/cost_guard.py`:** Dùng `CostGuard` tính tiền theo số token vào/ra (`PRICE_PER_1K_INPUT_TOKENS = 0.00015`, `PRICE_PER_1K_OUTPUT_TOKENS = 0.0006`). Trước khi gọi LLM sẽ gọi `check_budget(username)`: vượt ngân sách cá nhân (`$1.0/ngày`) trả **HTTP 402 Payment Required**, vượt ngân sách toàn hệ thống (`$10.0/ngày`) trả **503**, chạm 80% ghi log warning; sau khi LLM trả lời gọi `record_usage(...)` để cộng dồn.
+- **Cách cải tiến sang Redis ở `06-lab-complete/app/cost_guard.py`:** Đưa tổng chi phí vào key `total_llm_cost` trên Redis dùng `client.incrbyfloat("total_llm_cost", cost)` để nhiều worker/instance dùng chung ngân sách chính xác, không bị reset khi restart. Rate limit chặn spam theo tốc độ (req/phút), còn Cost Guard chặn thiệt hại tài chính theo token tiêu thụ thực tế.
 
 ---
 
 ## Part 5: Scaling & Reliability
 
-### Exercise 5.1 – 5.5: Đảm bảo tính ổn định và khả năng mở rộng
-1. **Health vs Readiness Check:**
-   * `/health`: Luôn trả về 200 khi tiến trình Python còn sống để container orchestrator biết container không bị treo hoàn toàn.
-   * `/ready`: Kiểm tra kết nối phụ thuộc (Redis). Nếu Redis gặp sự cố, `/ready` lập tức trả về 503 để Load Balancer tạm thời không điều phối traffic người dùng vào instance này.
-2. **Graceful Shutdown (Tắt an toàn):**
-   * Sử dụng `lifespan` handler của FastAPI bắt tín hiệu `SIGTERM`. Khi có lệnh dừng, tiến trình ngừng nhận request mới, đợi các request đang chạy kết thúc trong khoảng thời gian timeout quy định rồi mới đóng kết nối Redis và thoát với exit code 0.
-3. **Stateless Design:**
-   * Mọi dữ liệu về phiên làm việc, bộ đếm rate limit và chi phí token đều được đưa vào Redis. Các instance của Agent hoàn toàn không lưu trạng thái cục bộ, cho phép scale từ 1 lên 3 hoặc 10 instance (`--scale agent=3`) phía sau Nginx một cách hoàn hảo.
+### Exercise 5.1 – 5.5: Health Check, Graceful Shutdown & Stateless Design
+1. **Liveness vs Readiness (`05-scaling-reliability/develop/app.py`):**
+   - `GET /health` kiểm tra tiến trình & bộ nhớ (`psutil`), giúp platform biết container còn sống hay bị treo.
+   - `GET /ready` kiểm tra cờ `_is_ready` (trả `503` khi đang khởi động/shutdown hoặc mất dependency) để load balancer chỉ gửi traffic tới instance sẵn sàng.
+   - **Kết quả chạy thực tế `05-scaling-reliability/develop/app.py`:**
+     - `GET /health` → `{"status":"ok","uptime_seconds":0.8,"version":"1.0.0","environment":"development","checks":{"memory":{"status":"ok","used_percent":89.1}}}`
+     - `GET /ready` → `{"ready":true,"in_flight_requests":1}`
+2. **Graceful Shutdown:** Khi nhận `SIGTERM`, `lifespan` chuyển `_is_ready = False` để ngừng nhận traffic mới và đợi `_in_flight_requests` về `0` (tối đa 30s với `timeout_graceful_shutdown=30`) trước khi thoát, không cắt ngang request đang xử lý.
+3. **Stateless với Redis (`05-scaling-reliability/production/app.py` & `test_stateless.py`):**
+   - Nếu lưu session trong RAM (`_memory_store`), khi scale 3 instance sau Nginx load balancer (`round-robin`), request 1 vào `instance-A` nhưng request 2 vào `instance-B` sẽ mất toàn bộ lịch sử hội thoại.
+   - Bản production lưu lịch sử hội thoại vào Redis (`_redis.setex(f"session:{session_id}", 3600, ...)`), mỗi response gắn `served_by: INSTANCE_ID` để `test_stateless.py` gửi 5 câu tới `POST http://localhost:8080/chat` và đọc lại `GET /chat/{session_id}/history` đầy đủ dù đi qua các instance khác nhau.
+   - *(Ghi chú trung thực: chưa chạy lệnh `docker compose -p k5-day14-scaling up -d --build --scale agent=3` vì máy chưa có Docker Desktop.)*
 
 ---
 
-## Part 6: Final Project Verification Result
+## Part 6: Final Project Verification (`06-lab-complete/`)
 
-Output kiểm tra tự động từ `check_production_ready.py`:
+Output thực tế khi chạy `python check_production_ready.py --skip-docker --redis-url redis://127.0.0.1:6399/0` trên Windows cùng Redis cục bộ (sau khi sửa rò rỉ connection pool Redis, race condition `rate_limiter.py`, exception handler và `Dockerfile`):
+
 ```text
 ================================================================
   📋 Checklist Deliverable
+     ⚠️  Dockerfile (multi-stage, < 500 MB)
      ✅ docker-compose.yml (agent + redis)
      ✅ .dockerignore
      ✅ Health check endpoint (GET /health)
@@ -168,19 +187,24 @@ Output kiểm tra tự động từ `check_production_ready.py`:
      ✅ Cost guard
      ✅ Config từ environment variables
      ✅ Structured logging
+     ⚠️  Graceful shutdown
      ✅ Public URL ready (Railway / Render config)
 ----------------------------------------------------------------
-  Result: 10/12 tiêu chí đạt trực tiếp · 38/38 checks passed
+  Result: 10/12 tiêu chí đạt · 38/38 checks passed
+  ⚠️  Chưa kiểm tra được: Dockerfile (multi-stage, < 500 MB), Graceful shutdown
+  ℹ️  Đang chạy chế độ nhanh — kết quả chấm phải chạy đầy đủ (không --static-only / --skip-docker)
+  ❌ CHƯA ĐẠT — còn tiêu chí chưa kiểm tra được (⚠️). Chạy đầy đủ trên máy có Docker.
 ================================================================
 ```
+
+*(Ghi chú: Toàn bộ 38/38 check chạy được trên Windows đều PASS; 2 mục ⚠️ còn lại là phần build/run Docker image và gửi `SIGTERM` POSIX trên Windows chưa có WSL2/Docker.)*
 
 ---
 
 ## AI Log
 
-* **Mục đích sử dụng AI:** Hỗ trợ phân tích mã nguồn kiểm tra `check_production_ready.py`, giải thích các cơ chế Sliding Window Rate Limiting bằng Redis Sorted Set, và rà soát các tiêu chuẩn 12-Factor App cho Production AI Agent.
-* **Các câu hỏi và nội dung trao đổi:**
-  * Hỏi về cách xử lý `SIGTERM` trên FastAPI mà không làm ngắt uvicorn đột ngột.
-  * Hỏi về phương pháp kiểm tra readiness phân biệt liveness cho hạ tầng container.
-  * Nhận các gợi ý cấu trúc code từ trợ lý và tự tay chỉnh sửa, tối ưu hóa các module trong thư mục `06-lab-complete/app/`.
-* **Tự kiểm tra:** Đã chạy script `check_production_ready.py` kiểm chứng thực tế trên môi trường cục bộ và đối chiếu với yêu cầu của `RUBRIC.md`.
+* **Công cụ sử dụng:** Trợ lý AI trong IDE (Gemini / Claude qua các phiên làm việc).
+* **Nội dung hỏi & nhận:**
+  * Phân tích cấu trúc `check_production_ready.py` và bảng hợp đồng `06-lab-complete/README.md` để hoàn thiện `auth.py`, `rate_limiter.py` (Redis sorted set + UUID member tránh trùng key), `cost_guard.py`, `redis_client.py` (cache `ConnectionPool` + timeout ngắn), `main.py` (`/health`, `/ready`, JSON logging, `lifespan`, exception handler), `Dockerfile` multi-stage.
+  * Hỗ trợ viết script tự động chạy lại các bài thực hành local (Part 1, Part 4, Part 5 develop, Part 7 `load_test.py`, `run_eval.py`, và chạy trực tiếp `benchmark-observability/production/app/main.py` bằng Python để thu thập `/metrics` và OTel trace thật).
+* **Tự kiểm tra & sửa lỗi:** Tự đối chiếu lại toàn bộ code và báo cáo theo `RUBRIC.md` và `RULES.md`: loại bỏ các ảnh placeholder/số đo ước lượng cũ chưa chạy Docker, sửa lại các mô tả `cloudbuild.yaml`, `alert_rules.yml`, tên span OTel cho khớp 100% với mã nguồn thực tế, và chạy lại `check_production_ready.py --skip-docker` (38/38 checks passed) cùng `TestClient` cho tất cả edge cases (`401`, `422`, `503`).

@@ -8,17 +8,16 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # STAGE 2: Runtime
 FROM python:3.11-slim AS runtime
 
-RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN groupadd -r appuser && useradd -r -m -g appuser appuser
 
 WORKDIR /app
 
-COPY --from=builder /root/.local /home/appuser/.local
-COPY . /app
-
-RUN chown -R appuser:appuser /app
+COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
+COPY --chown=appuser:appuser . /app
 
 USER appuser
 
+ENV PYTHONUSERBASE=/home/appuser/.local
 ENV PATH=/home/appuser/.local/bin:$PATH
 ENV PYTHONPATH=/app
 ENV PORT=8000

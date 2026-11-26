@@ -14,7 +14,7 @@ async def verify_api_key(
 ) -> str:
     """Dependency cho FastAPI — dùng trong /ask: Depends(verify_api_key)."""
     expected_key = os.getenv("AGENT_API_KEY", settings.agent_api_key)
-    if not api_key or api_key != expected_key:
+    if not expected_key or not api_key or api_key != expected_key:
         raise HTTPException(
             status_code=401,
             detail="Unauthorized: Missing or invalid API Key",
